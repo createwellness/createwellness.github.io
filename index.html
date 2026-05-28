@@ -253,14 +253,15 @@ const RETAILER_LOGO_URLS = {
 };
 
 const COLUMN_ALIASES = {
-  'Geography':      ['geography','retailer','account','market','channel','store','banner','customer'],
-  'Time Period':    ['time period','period','timeperiod','weeks','duration','week ending','numberofweeks','number of weeks'],
-  'Product Level':  ['product level','reporting level','level','reporting levels standard'],
-  'Subcategory':    ['subcategory','sub category','sub-category','category','segment','product category','product type'],
-  'Brand':          ['brand','brand name','manufacturer','supplier','brand_name'],
-  'Description':    ['description','product','upc description','item description','sku description','product description','item name','upc desc'],
-  'Dollars':        ['dollars','net sales','revenue','dollar sales','total sales'],
-  'Dollars, Yago':  ['dollars, yago','yago','prior year','prior year sales','year ago','ly sales','last year','py dollars','py sales','year ago dollars','sales yago'],
+  'Geography':            ['geography','retailer','account','market','channel','store','banner','customer'],
+  'Time Period':          ['time period','period','timeperiod','weeks','duration','numberofweeks','number of weeks'],
+  'Time Period End Date': ['time period end date','end date','period end date','period ending','week ending','ending'],
+  'Product Level':        ['product level','reporting level','level','reporting levels standard'],
+  'Subcategory':          ['subcategory','sub category','sub-category','category','segment','product category','product type'],
+  'Brand':                ['brand','brand name','manufacturer','supplier','brand_name'],
+  'Description':          ['description','product','upc description','item description','sku description','product description','item name','upc desc'],
+  'Dollars':              ['dollars','net sales','revenue','dollar sales','total sales'],
+  'Dollars, Yago':        ['dollars, yago','yago','prior year','prior year sales','year ago','ly sales','last year','py dollars','py sales','year ago dollars','sales yago'],
 };
 
 const TIME_PERIODS = ['4 Weeks','12 Weeks','24 Weeks','52 Weeks'];
@@ -921,6 +922,371 @@ function drawStarburst(doc, cx, cy, r, spokes, rr, gg, bb) {
 }
 
 // ══════════════════════════════════════════════════
+// TREND CHART HELPERS (for PDF only)
+// Brand-colored line charts that visualize KPI trends over time,
+// styled to match the Create Wellness "4 Week Quads" deck format.
+// ══════════════════════════════════════════════════
+
+// Brand color palette — Create orange first (reserved), then a set of
+// visually distinct colors that work on white backgrounds.
+const BRAND_COLORS = [
+  [245, 126, 37],   // 0: orange — CREATE (reserved)
+  [115, 115, 115],  // 1: medium gray
+  [45,  125, 70],   // 2: dark green
+  [251, 174, 66],   // 3: gold
+  [180, 70,  145],  // 4: magenta
+  [80,  150, 200],  // 5: blue
+  [160, 210, 165],  // 6: sage green
+  [200, 100, 80],   // 7: coral
+  [120, 90,  170],  // 8: purple
+  [60,  130, 140],  // 9: teal
+];
+
+// Assign each brand a stable color. Create always gets orange (slot 0).
+// Other brands are assigned by their order in the input list.
+function assignBrandColors(brandNames) {
+  const map = {};
+  let next = 1;
+  for (const name of brandNames) {
+    if (/create/i.test(name) && !map[name]) {
+      map[name] = BRAND_COLORS[0];
+    } else if (!map[name]) {
+      map[name] = BRAND_COLORS[next % BRAND_COLORS.length];
+      next++;
+      if (next % BRAND_COLORS.length === 0) next++; // skip slot 0 (orange) on wrap
+    }
+  }
+  return map;
+}
+
+// Build trend series for one KPI: returns { xLabels, series:[{brand,values,color,total}], xMode }
+// xMode = 'dates' (using Time Period End Date) or 'periods' (fallback to 4W/12W/24W/52W)
+function pivotTrendData(data, geo, cat, groupCol, def, kpiCols, productLevel) {
+  let sub = data.filter(r => r.Geography === geo);
+  if (cat && cat !== 'All') sub = sub.filter(r => r.Subcategory === cat);
+
+  // Apply product-level filter if column present
+  if (productLevel) {
+    const hasLevelCol = sub.some(r => r['Product Level'] != null && r['Product Level'] !== '');
+    if (hasLevelCol) {
+      const want = productLevel.toUpperCase();
+      sub = sub.filter(r => {
+        const v = r['Product Level'];
+        return v != null && String(v).toUpperCase().trim() === want;
+      });
+    }
+  }
+  if (!sub.length) return null;
+
+  const kpiCol = kpiCols[def.key]?.current;
+  if (!kpiCol) return null;
+
+  // Choose X axis: prefer End Date filtered to shortest available period (4 Weeks)
+  // Fallback: plot the 4 standard time periods as the X axis
+  const hasEndDate = sub.some(r => r['Time Period End Date'] != null && r['Time Period End Date'] !== '');
+
+  let xKeys = [];   // raw values used for grouping
+  let xLabels = []; // display labels for the chart axis
+  let xMode = 'periods';
+  let getKey;
+
+  if (hasEndDate) {
+    // Pick the shortest period available so the trend has the most data points
+    const periodsPresent = [...new Set(sub.map(r => r['Time Period']).filter(Boolean))];
+    const ordered = ['4 Weeks','12 Weeks','24 Weeks','52 Weeks'];
+    const chosenPeriod = ordered.find(p => periodsPresent.includes(p)) || periodsPresent[0];
+    if (chosenPeriod) sub = sub.filter(r => r['Time Period'] === chosenPeriod);
+
+    // Collect unique dates, sort chronologically
+    const dates = [...new Set(sub.map(r => r['Time Period End Date']).filter(Boolean))];
+    dates.sort((a, b) => {
+      const da = new Date(a), db = new Date(b);
+      if (isNaN(da) || isNaN(db)) return String(a).localeCompare(String(b));
+      return da - db;
+    });
+    xKeys = dates;
+    xLabels = dates.map(formatShortDate);
+    getKey = r => r['Time Period End Date'];
+    xMode = 'dates';
+  } else {
+    const ordered = ['4 Weeks','12 Weeks','24 Weeks','52 Weeks'];
+    xKeys = ordered.filter(p => sub.some(r => r['Time Period'] === p));
+    if (!xKeys.length) return null;
+    xLabels = xKeys;
+    getKey = r => r['Time Period'];
+    xMode = 'periods';
+  }
+
+  // Need at least 2 X points to draw a trend line; otherwise the chart is useless
+  if (xKeys.length < 2) return null;
+
+  // Build per-brand series
+  const brandData = {};
+  sub.forEach(r => {
+    const b = r[groupCol];
+    if (b == null || b === '') return;
+    const xk = getKey(r);
+    if (xk == null) return;
+    const v = parseFloat(r[kpiCol]);
+    if (isNaN(v)) return;
+    if (!brandData[b]) brandData[b] = {};
+    if (!brandData[b][xk]) brandData[b][xk] = [];
+    brandData[b][xk].push(v);
+  });
+
+  const series = [];
+  for (const [brand, byKey] of Object.entries(brandData)) {
+    const values = xKeys.map(xk => {
+      const vals = byKey[xk];
+      if (!vals || !vals.length) return null;
+      return def.agg === 'sum'
+        ? vals.reduce((a, v) => a + v, 0)
+        : vals.reduce((a, v) => a + v, 0) / vals.length;
+    });
+    const total = values.reduce((a, v) => a + (v || 0), 0);
+    const hasData = values.some(v => v != null);
+    if (hasData) series.push({ brand, values, total });
+  }
+
+  if (!series.length) return null;
+
+  // Keep top 7 by total (matching the example deck's 7-brand legend)
+  series.sort((a, b) => b.total - a.total);
+  let top = series.slice(0, 7);
+
+  // Always include Create if it's in the dataset and got bumped
+  const createIdx = series.findIndex(s => /create/i.test(s.brand));
+  if (createIdx >= 0 && !top.some(s => /create/i.test(s.brand))) {
+    top[top.length - 1] = series[createIdx];
+    top.sort((a, b) => b.total - a.total);
+  }
+
+  // Assign colors — Create always gets orange
+  const colors = assignBrandColors(top.map(s => s.brand));
+  top.forEach(s => { s.color = colors[s.brand]; });
+
+  return { xLabels, xKeys, series: top, xMode };
+}
+
+// Format an ISO-ish date to "M/D/YY" for compact chart axis labels
+function formatShortDate(d) {
+  if (!d) return '';
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return String(d);
+  return `${dt.getMonth()+1}/${dt.getDate()}/${String(dt.getFullYear()).slice(2)}`;
+}
+
+// Y-axis tick value formatter — compact (no trailing zeros for large numbers)
+function fmtChartY(v, fmt) {
+  if (v == null || isNaN(v)) return '';
+  if (fmt === 'currency') {
+    if (Math.abs(v) >= 1000) return '$' + Math.round(v).toLocaleString('en-US');
+    return '$' + v.toFixed(1);
+  }
+  if (fmt === 'percent_raw') return v.toFixed(1) + '%';
+  if (fmt === 'decimal') {
+    if (Math.abs(v) >= 1000) return Math.round(v).toLocaleString('en-US');
+    if (Math.abs(v) >= 10) return v.toFixed(1);
+    return v.toFixed(2);
+  }
+  return String(v);
+}
+
+// Round a value up to a "nice" number for axis ranges
+function niceMaxValue(v) {
+  if (v <= 0) return 1;
+  const exp = Math.floor(Math.log10(v));
+  const f = v / Math.pow(10, exp);
+  let nice;
+  if (f <= 1)      nice = 1;
+  else if (f <= 2) nice = 2;
+  else if (f <= 2.5) nice = 2.5;
+  else if (f <= 5) nice = 5;
+  else             nice = 10;
+  return nice * Math.pow(10, exp);
+}
+
+// Friendly chart titles that match the example deck's wording
+function chartTitleForKPI(def) {
+  const map = {
+    sales: 'Average Weekly $ Sales',
+    acv:   'Avg % ACV',
+    items: 'Avg Items Selling per Store',
+    promo: 'Dollars % Promo',
+    arp:   'Avg Retail Price (ARP)',
+    dssw:  '$ / S / S / W',
+    ussw:  'U / S / S / W',
+    dsw:   'Avg Weekly $ per Store',
+    usw:   'Avg Weekly Units per Store',
+  };
+  return map[def.key] || def.label;
+}
+
+// Draw a full-page trend chart on the current PDF page.
+// Layout matches the Create Wellness deck: title top-left, KPI bar, plot area,
+// brand legend at bottom, source note at bottom-left.
+function drawTrendChart(doc, def, trendData, W, H, M, lbl, geo, cat, reportDate) {
+  const { xLabels, series, xMode } = trendData;
+  const n = xLabels.length;
+
+  // ── Page header: title (left) + asterisk symbol (right) ──
+  doc.setTextColor(245, 126, 37);
+  doc.setFontSize(17);
+  doc.setFont('helvetica', 'bold');
+  const period = xMode === 'dates' ? '4 Week Quads' : 'Period Comparison';
+  doc.text(`${lbl} Sell Through Data (${period})`, M, M + 6);
+
+  if (cat && cat !== 'All') {
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(140, 140, 140);
+    const catLabel = CAT_LABELS[cat] || cat;
+    doc.text(catLabel, M, M + 11.5);
+  }
+
+  // Asterisk top-right (Create brand symbol)
+  drawStarburst(doc, W - M - 4, M + 4, 4.5, 12, 245, 126, 37);
+
+  // ── KPI title bar (orange, white centered text) ──
+  const tbarY = M + 16;
+  const tbarH = 9;
+  doc.setFillColor(245, 126, 37);
+  doc.rect(M, tbarY, W - 2 * M, tbarH, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(12);
+  doc.setFont('helvetica', 'bold');
+  doc.text(chartTitleForKPI(def), W / 2, tbarY + 6.2, { align: 'center' });
+
+  // ── Plot area geometry ──
+  // Leave room on left for Y-axis labels, right for line-end value labels,
+  // bottom for X labels + legend + source line.
+  const plotX = M + 16;
+  const plotY = tbarY + tbarH + 7;
+  const plotW = W - plotX - M - 22;
+  const plotH = H - plotY - 28;
+
+  // ── Compute Y range ──
+  const allVals = [];
+  series.forEach(s => s.values.forEach(v => { if (v != null && !isNaN(v)) allVals.push(v); }));
+  if (!allVals.length) return;
+  const dataMax = Math.max(...allVals);
+  const yMax = niceMaxValue(dataMax * 1.08); // headroom for top labels
+  const yMin = 0;
+  const yRange = yMax - yMin || 1;
+
+  // ── Grid + Y-axis labels ──
+  const yTicks = 6;
+  doc.setFontSize(7);
+  doc.setFont('helvetica', 'normal');
+  for (let i = 0; i <= yTicks; i++) {
+    const yVal = yMin + (yRange * i / yTicks);
+    const yPos = plotY + plotH - (plotH * i / yTicks);
+    // Light horizontal grid line
+    doc.setDrawColor(232, 232, 232);
+    doc.setLineWidth(0.15);
+    doc.line(plotX, yPos, plotX + plotW, yPos);
+    // Y tick label
+    doc.setTextColor(120, 120, 120);
+    doc.text(fmtChartY(yVal, def.fmt), plotX - 1.5, yPos + 1, { align: 'right' });
+  }
+
+  // X-axis baseline
+  doc.setDrawColor(180, 180, 180);
+  doc.setLineWidth(0.3);
+  doc.line(plotX, plotY + plotH, plotX + plotW, plotY + plotH);
+
+  // ── X-axis labels ──
+  doc.setTextColor(120, 120, 120);
+  doc.setFontSize(7);
+  for (let i = 0; i < n; i++) {
+    const xPos = plotX + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+    doc.text(xLabels[i], xPos, plotY + plotH + 4.5, { align: 'center' });
+  }
+
+  // ── Draw each brand's line + markers + end label ──
+  // To avoid overlapping end labels, collect them and stagger if needed
+  const endLabels = [];
+  series.forEach(s => {
+    const [r, g, b] = s.color;
+
+    // Build screen points
+    const pts = [];
+    s.values.forEach((v, i) => {
+      if (v == null || isNaN(v)) return;
+      const x = plotX + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+      const y = plotY + plotH - ((v - yMin) / yRange) * plotH;
+      pts.push({ x, y, val: v, idx: i });
+    });
+    if (!pts.length) return;
+
+    // Line segments
+    doc.setDrawColor(r, g, b);
+    doc.setLineWidth(0.85);
+    for (let i = 1; i < pts.length; i++) {
+      doc.line(pts[i-1].x, pts[i-1].y, pts[i].x, pts[i].y);
+    }
+
+    // Circle markers
+    doc.setFillColor(r, g, b);
+    pts.forEach(p => doc.circle(p.x, p.y, 0.9, 'F'));
+
+    // End label: brand color, bold, just right of last point
+    const last = pts[pts.length - 1];
+    const valLabel = fmtChartY(last.val, def.fmt);
+    endLabels.push({ x: last.x + 2.2, y: last.y, label: valLabel, color: [r, g, b] });
+  });
+
+  // Stagger overlapping end labels (simple greedy: if too close to a previous one, nudge)
+  endLabels.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < endLabels.length; i++) {
+    const minGap = 3.2;
+    if (endLabels[i].y - endLabels[i-1].y < minGap) {
+      endLabels[i].y = endLabels[i-1].y + minGap;
+    }
+  }
+  doc.setFontSize(7.5);
+  doc.setFont('helvetica', 'bold');
+  endLabels.forEach(el => {
+    doc.setTextColor(...el.color);
+    doc.text(el.label, el.x, el.y + 1);
+  });
+
+  // ── Brand legend (horizontal row, centered at bottom) ──
+  doc.setFontSize(7);
+  doc.setFont('helvetica', 'normal');
+  const items = series.map(s => ({
+    name: s.brand.length > 22 ? s.brand.substring(0, 21) + '…' : s.brand,
+    color: s.color,
+  }));
+  const itemWidths = items.map(it => doc.getTextWidth(it.name) + 7);
+  const totalW = itemWidths.reduce((a, w) => a + w, 0);
+
+  const legendY = plotY + plotH + 12;
+  let xCursor = (W - totalW) / 2;
+  if (xCursor < M) xCursor = M; // fallback if too wide
+
+  items.forEach((it, i) => {
+    const [r, g, b] = it.color;
+    // Color swatch: small line with dot
+    doc.setDrawColor(r, g, b);
+    doc.setFillColor(r, g, b);
+    doc.setLineWidth(0.9);
+    doc.line(xCursor, legendY, xCursor + 3.5, legendY);
+    doc.circle(xCursor + 1.75, legendY, 0.9, 'F');
+    // Brand name
+    doc.setTextColor(80, 80, 80);
+    doc.text(it.name, xCursor + 4.5, legendY + 1);
+    xCursor += itemWidths[i];
+  });
+
+  // ── Source note bottom-left ──
+  doc.setFontSize(6.5);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(140, 140, 140);
+  doc.text(`Source: SPINS data, ${reportDate}.`, M, H - 4);
+}
+
+// ══════════════════════════════════════════════════
 // PDF GENERATION  (jsPDF + autoTable)
 // ══════════════════════════════════════════════════
 async function buildPDF(df, retailers, periods, cats, reportDate, kpiCols, reportMode) {
@@ -983,6 +1349,7 @@ async function buildPDF(df, retailers, periods, cats, reportDate, kpiCols, repor
   doc.text(`Categories: ${cats.map(c => CAT_LABELS[c] || c).join(' · ') || 'All'}`, M, 160);
   doc.text(`Time periods: ${periods.join(' · ')}`, M, 167);
   doc.text(`Metrics: ${detectedKPIs.map(d => d.label.split(' (')[0]).join(' · ')}`, M, 174);
+  doc.text(`Includes: trend charts per KPI + detailed data tables`, M, 181);
 
   // ── Per retailer/category KPI pages ─────────────
   const effectiveCats = (cats && cats.length) ? cats : [null];
@@ -992,6 +1359,17 @@ async function buildPDF(df, retailers, periods, cats, reportDate, kpiCols, repor
       const data = pivotData(df, geo, cat, groupCol, periods, kpiCols, productLevel);
       if (!data.length) continue;
 
+      // ─── CHART PAGES — one full-page trend chart per KPI ───
+      // Each chart shows the KPI trended across time period end dates,
+      // with one colored line per top brand. Skipped if no trend data.
+      for (const def of detectedKPIs) {
+        const trend = pivotTrendData(df, geo, cat, groupCol, def, kpiCols, productLevel);
+        if (!trend) continue; // not enough data points or no values
+        doc.addPage();
+        drawTrendChart(doc, def, trend, W, H, M, lbl, geo, cat, reportDate);
+      }
+
+      // ─── DATA TABLE PAGE — existing stacked KPI tables ───
       doc.addPage();
       let y = M;
 
@@ -1123,8 +1501,8 @@ async function processFile(file) {
   const headers = Object.keys(raw[0]);
   S.colMap  = detectColumns(headers);
 
-  // Product Level is optional — file may not have it (older SPINS extracts)
-  const OPTIONAL = new Set(['Product Level']);
+  // Product Level + End Date are optional — older SPINS extracts may not have them
+  const OPTIONAL = new Set(['Product Level', 'Time Period End Date']);
   const missing = Object.entries(S.colMap).filter(([k,v]) => v === null && !OPTIONAL.has(k)).map(([k]) => k);
   $('placeholder').classList.add('hidden');
 
