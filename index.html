@@ -108,6 +108,20 @@ table.preview td{padding:12px 20px;border-top:1px solid rgba(255,255,255,.07);wh
   .upload-area h3 { font-size:1.1rem }
 }
 .hidden{display:none!important}
+
+/* ── REPORT MODE TOGGLE ── */
+.mode-toggle{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:6px}
+.mode-tile{background:rgba(255,255,255,.08);border:2px solid rgba(255,255,255,.18);border-radius:14px;padding:28px 24px;cursor:pointer;transition:all .15s;text-align:left}
+.mode-tile:hover:not(.disabled){background:rgba(255,255,255,.13);border-color:rgba(255,255,255,.4)}
+.mode-tile.active{background:#fff;border-color:#fff}
+.mode-tile.active .m-title{color:var(--orange)}
+.mode-tile.active .m-desc{color:#666}
+.mode-tile.active .m-badge{background:var(--orange);color:#fff}
+.mode-tile.disabled{opacity:.35;cursor:not-allowed}
+.m-badge{display:inline-block;font-size:.62rem;letter-spacing:.18em;text-transform:uppercase;background:rgba(255,255,255,.18);color:rgba(255,255,255,.7);padding:4px 10px;border-radius:20px;margin-bottom:14px;font-weight:600}
+.m-title{font-family:'Unbounded',sans-serif;font-size:1.35rem;font-weight:700;color:#fff;margin-bottom:8px;line-height:1.1}
+.m-desc{font-size:.85rem;color:rgba(255,255,255,.65);line-height:1.45}
+@media (max-width:700px){.mode-toggle{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -149,6 +163,27 @@ table.preview td{padding:12px 20px;border-top:1px solid rgba(255,255,255,.07);wh
     <p class="caption" id="cap-cats"></p>
     <p class="caption" id="cap-periods"></p>
     <div class="tbl-wrap"><table class="preview" id="preview-tbl"></table></div>
+  </div>
+
+  <div id="mode-section" class="hidden">
+    <hr class="divider">
+    <div class="section-label">Report Mode</div>
+    <p style="margin:-4px 0 14px;color:rgba(255,255,255,.7);font-size:.92rem">
+      Choose which level of data to include. This prevents double-counting (Brand-level + UPC-level rows would otherwise sum twice).
+    </p>
+    <div class="mode-toggle">
+      <div class="mode-tile" id="mode-tile-brand" data-mode="brand">
+        <span class="m-badge">Aggregate</span>
+        <div class="m-title">Brand Report</div>
+        <div class="m-desc">One row per brand. Use this for board-level summaries and brand performance reviews.</div>
+      </div>
+      <div class="mode-tile" id="mode-tile-sku" data-mode="sku">
+        <span class="m-badge">Granular</span>
+        <div class="m-title">SKU Report</div>
+        <div class="m-desc">One row per UPC / product. Use this for item-level performance and assortment decisions.</div>
+      </div>
+    </div>
+    <p class="caption" id="mode-note" style="margin-top:10px"></p>
   </div>
 
   <div id="generate-section" class="hidden">
@@ -218,22 +253,140 @@ const RETAILER_LOGO_URLS = {
 };
 
 const COLUMN_ALIASES = {
-  'Geography':     ['geography','retailer','account','market','channel','store','banner','customer'],
-  'Time Period':   ['time period','period','timeperiod','weeks','duration','week ending','numberofweeks','number of weeks'],
-  'Subcategory':   ['subcategory','sub category','sub-category','category','segment','product category','product type'],
-  'Brand':         ['brand','brand name','manufacturer','supplier','brand_name'],
-  'Description':   ['description','product','upc description','item description','sku description','product description','item name','upc desc'],
-  'Dollars':       ['dollars','net sales','revenue','dollar sales','total sales'],
-  'Dollars, Yago': ['dollars, yago','yago','prior year','prior year sales','year ago','ly sales','last year','py dollars','py sales','year ago dollars','sales yago'],
+  'Geography':      ['geography','retailer','account','market','channel','store','banner','customer'],
+  'Time Period':    ['time period','period','timeperiod','weeks','duration','week ending','numberofweeks','number of weeks'],
+  'Product Level':  ['product level','reporting level','level','reporting levels standard'],
+  'Subcategory':    ['subcategory','sub category','sub-category','category','segment','product category','product type'],
+  'Brand':          ['brand','brand name','manufacturer','supplier','brand_name'],
+  'Description':    ['description','product','upc description','item description','sku description','product description','item name','upc desc'],
+  'Dollars':        ['dollars','net sales','revenue','dollar sales','total sales'],
+  'Dollars, Yago':  ['dollars, yago','yago','prior year','prior year sales','year ago','ly sales','last year','py dollars','py sales','year ago dollars','sales yago'],
 };
 
 const TIME_PERIODS = ['4 Weeks','12 Weeks','24 Weeks','52 Weeks'];
 const CAT_LABELS   = {'CREATINE':'Creatine','HYDRATION & ELECTROLYTE':'Electrolytes'};
 
 // ══════════════════════════════════════════════════
+// KPI DEFINITIONS — all metrics pulled from SPINS
+// Each KPI has detection aliases (substring match on column name),
+// YAGO aliases (for comparison), format type, and aggregation method.
+// agg='sum' for additive metrics ($ Sales); agg='mean' for per-store/per-week metrics
+// ══════════════════════════════════════════════════
+const KPI_DEFS = [
+  {
+    key: 'sales', label: '$ Sales', fmt: 'currency', agg: 'sum', showGrowth: true,
+    aliases:     ['dollars','dollar sales','net sales','total sales','revenue','$ sales','sales'],
+    yagoAliases: ['dollars, yago','yago','prior year','year ago','last year','py dollars','sales yago'],
+  },
+  {
+    key: 'acv', label: 'Avg %ACV', fmt: 'percent_raw', agg: 'mean', showGrowth: false,
+    aliases:     ['avg % acv','avg %acv','%acv','acv','average % acv','avg acv'],
+    yagoAliases: ['avg % acv, yago','%acv yago','acv yago','avg %acv yago','avg acv yago'],
+  },
+  {
+    key: 'items', label: 'Avg Items Selling per Store', fmt: 'decimal', agg: 'mean', showGrowth: false,
+    aliases:     ['avg items','items selling','average items','avg items selling per store','avg items per store'],
+    yagoAliases: ['avg items, yago','items yago','avg items selling yago','avg items per store yago'],
+  },
+  {
+    key: 'promo', label: 'Dollars % Promo', fmt: 'percent_raw', agg: 'mean', showGrowth: false,
+    aliases:     ['dollars, % promo','dollars % promo','% promo','percent promo','promo %','dollar % promo'],
+    yagoAliases: ['dollars, % promo, yago','% promo yago','promo yago','dollar % promo yago'],
+  },
+  {
+    key: 'arp', label: 'Avg Retail Price (ARP)', fmt: 'currency', agg: 'mean', showGrowth: false,
+    aliases:     ['arp','avg retail price','average retail price','avg price'],
+    yagoAliases: ['arp, yago','arp yago','avg retail price yago'],
+  },
+  {
+    key: 'dssw', label: '$/S/S/W (Avg Weekly $ per Store Selling per Item)', fmt: 'currency', agg: 'mean', showGrowth: false,
+    aliases:     ['average weekly dollars per store selling per item','avg weekly dollars per store selling per item','avg weekly $ per store selling per item','$/s/s/w','dollars per store selling','weekly dollars per store selling'],
+    yagoAliases: ['average weekly dollars per store selling per item, yago','avg weekly $ per store selling yago','$/s/s/w yago','dollars per store selling yago'],
+  },
+  {
+    key: 'ussw', label: 'U/S/S/W (Avg Weekly Units per Store Selling per Item)', fmt: 'decimal', agg: 'mean', showGrowth: false,
+    aliases:     ['average weekly units per store selling per item','avg weekly units per store selling per item','u/s/s/w','units per store selling','weekly units per store selling'],
+    yagoAliases: ['average weekly units per store selling per item, yago','avg weekly units per store selling yago','u/s/s/w yago','units per store selling yago'],
+  },
+  {
+    key: 'dsw', label: 'Avg Weekly $ per Store', fmt: 'currency', agg: 'mean', showGrowth: false,
+    aliases:     ['average weekly dollars per store','avg weekly dollars per store','avg weekly $ per store'],
+    yagoAliases: ['average weekly dollars per store, yago','avg weekly $ per store yago'],
+  },
+  {
+    key: 'usw', label: 'Avg Weekly Units per Store', fmt: 'decimal', agg: 'mean', showGrowth: false,
+    aliases:     ['average weekly units per store','avg weekly units per store'],
+    yagoAliases: ['average weekly units per store, yago','avg weekly units per store yago'],
+  },
+];
+
+// ══════════════════════════════════════════════════
 // STATE
 // ══════════════════════════════════════════════════
-const S = { rawData:null, colMap:{}, df:null, retailers:{}, periods:[], cats:[], zipBlob:null };
+const S = {
+  rawData: null, colMap: {}, df: null,
+  retailers: {}, periods: [], cats: [],
+  productLevels: [],      // distinct values found in Product Level column
+  reportMode: null,       // 'brand' | 'sku' — chosen by user
+  kpiCols: {},            // map of KPI key -> { current: <raw col name>, yago: <raw col name|null> }
+  zipBlob: null,
+};
+
+// ══════════════════════════════════════════════════
+// KPI COLUMN DETECTION — scan raw headers for matching KPI columns.
+// Returns { sales: {current, yago}, acv: {...}, ... } keyed by KPI key.
+// Only includes KPIs where the CURRENT column was found.
+// ══════════════════════════════════════════════════
+function detectKPIs(headers) {
+  const found = {};
+  // Build a normalized lookup: lowercased header -> raw header
+  const normalized = {};
+  headers.forEach(h => {
+    if (h == null) return;
+    normalized[String(h).toLowerCase().trim()] = h;
+  });
+
+  for (const def of KPI_DEFS) {
+    // Find current-period column: longest matching alias (avoids partial matches grabbing wrong column)
+    let bestCur = null, bestCurLen = 0;
+    for (const [hl, horig] of Object.entries(normalized)) {
+      // Must not match YAGO patterns
+      if (hl.includes('yago') || hl.includes('prior year') || hl.includes('year ago') || hl.includes('last year') || /\bly\b/.test(hl)) continue;
+      for (const a of def.aliases) {
+        if (hl === a) { if (a.length > bestCurLen) { bestCur = horig; bestCurLen = a.length + 1000; } } // exact match wins
+        else if (hl.includes(a) && a.length >= 3 && a.length > bestCurLen) { bestCur = horig; bestCurLen = a.length; }
+      }
+    }
+    if (!bestCur) continue;
+
+    // Find YAGO column
+    let bestYago = null, bestYagoLen = 0;
+    for (const [hl, horig] of Object.entries(normalized)) {
+      if (horig === bestCur) continue;
+      const isYago = hl.includes('yago') || hl.includes('prior year') || hl.includes('year ago') || hl.includes('last year') || /\bly\b/.test(hl);
+      if (!isYago) continue;
+      for (const a of def.yagoAliases) {
+        if (hl === a) { if (a.length > bestYagoLen) { bestYago = horig; bestYagoLen = a.length + 1000; } }
+        else if (hl.includes(a) && a.length >= 3 && a.length > bestYagoLen) { bestYago = horig; bestYagoLen = a.length; }
+      }
+    }
+    found[def.key] = { current: bestCur, yago: bestYago };
+  }
+  return found;
+}
+
+// Detect distinct Product Level values present in the data
+function detectProductLevels(df) {
+  const levels = new Set();
+  df.forEach(r => {
+    const v = r['Product Level'];
+    if (v != null && v !== '') {
+      const u = String(v).toUpperCase().trim();
+      if (u === 'BRAND' || u === 'UPC' || u === 'BRAND/UPC') levels.add(u);
+    }
+  });
+  return [...levels];
+}
 
 // ══════════════════════════════════════════════════
 // COLUMN DETECTION
@@ -335,12 +488,31 @@ function detectPeriods(data) {
 
 // ══════════════════════════════════════════════════
 // DATA PIVOT
+// Filters by Product Level (if column exists + level passed in),
+// groups by groupCol, and extracts ALL detected KPIs per period.
+// Returns rows with flat keys like `<key> <period>` and `<key> YAGO <period>`.
+// agg: 'sum' adds rows together (for $ Sales); 'mean' averages (per-store metrics)
 // ══════════════════════════════════════════════════
-function pivotData(data, geo, cat, groupCol, periods) {
+function pivotData(data, geo, cat, groupCol, periods, kpiCols, productLevel) {
   let sub = data.filter(r => r.Geography === geo);
   if (cat && cat !== 'All') sub = sub.filter(r => r.Subcategory === cat);
+
+  // Filter by product level if requested AND the column exists in this data
+  if (productLevel) {
+    const hasLevelCol = sub.some(r => r['Product Level'] != null && r['Product Level'] !== '');
+    if (hasLevelCol) {
+      const want = productLevel.toUpperCase();
+      sub = sub.filter(r => {
+        const v = r['Product Level'];
+        return v != null && String(v).toUpperCase().trim() === want;
+      });
+    }
+    // If no Product Level column, fall back: skip filter (data is already at one level)
+  }
+
   if (!sub.length) return [];
 
+  // Group rows by the chosen column (Brand or Description)
   const groups = {};
   sub.forEach(r => {
     const n = r[groupCol];
@@ -352,18 +524,47 @@ function pivotData(data, geo, cat, groupCol, periods) {
   const rows = [];
   for (const [name, grp] of Object.entries(groups)) {
     const row = { [groupCol]: name };
+
     periods.forEach(tp => {
       const tpR = grp.filter(r => r['Time Period'] === tp);
-      const s   = tpR.reduce((a, r) => a + (parseFloat(r.Dollars)           || 0), 0);
-      const y   = tpR.reduce((a, r) => a + (parseFloat(r['Dollars, Yago']) || 0), 0);
-      row[`$ Sales ${tp}`]      = s;
-      row[`$ Sales YAGO ${tp}`] = y;
-      row[`% Growth ${tp}`]     = y ? (s - y) / y : null;
+
+      for (const def of KPI_DEFS) {
+        const cols = kpiCols[def.key];
+        if (!cols) continue; // KPI not present in this file
+
+        // Current period
+        const vals = tpR.map(r => parseFloat(r[cols.current])).filter(v => !isNaN(v));
+        let cur = null;
+        if (vals.length) {
+          cur = def.agg === 'sum' ? vals.reduce((a, v) => a + v, 0) : vals.reduce((a, v) => a + v, 0) / vals.length;
+        }
+        row[`${def.key} ${tp}`] = cur;
+
+        // YAGO period (if column present)
+        if (cols.yago) {
+          const yvals = tpR.map(r => parseFloat(r[cols.yago])).filter(v => !isNaN(v));
+          let ygo = null;
+          if (yvals.length) {
+            ygo = def.agg === 'sum' ? yvals.reduce((a, v) => a + v, 0) : yvals.reduce((a, v) => a + v, 0) / yvals.length;
+          }
+          row[`${def.key} YAGO ${tp}`] = ygo;
+
+          // Growth % only meaningful for sum-aggregated metrics (sales) or where requested
+          if (def.showGrowth && cur != null && ygo) {
+            row[`${def.key} Growth ${tp}`] = (cur - ygo) / ygo;
+          } else {
+            row[`${def.key} Growth ${tp}`] = null;
+          }
+        }
+      }
     });
+
     rows.push(row);
   }
-  const sk = `$ Sales ${periods[periods.length-1]}`;
-  rows.sort((a, b) => (b[sk]||0) - (a[sk]||0));
+
+  // Sort by last-period sales descending (most relevant metric for ranking)
+  const sk = `sales ${periods[periods.length - 1]}`;
+  rows.sort((a, b) => (b[sk] || 0) - (a[sk] || 0));
   return rows;
 }
 
@@ -373,6 +574,27 @@ function pivotData(data, geo, cat, groupCol, periods) {
 const fmtCur  = v => v == null ? '-' : '$' + v.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
 const fmtSign = v => v == null || isNaN(v) ? 'n.m.' : (v >= 0 ? '+' : '') + (v*100).toFixed(1) + '%';
 const fmtPct  = v => v == null || isNaN(v) ? 'n.m.' : (v*100).toFixed(1) + '%';
+const fmtDec  = v => v == null || isNaN(v) ? '-' : v.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+
+// Format a KPI value according to its declared format type.
+// percent_raw assumes value is already 0-100 scale (SPINS reports %ACV as 87.3, not 0.873)
+function fmtKPI(v, fmt) {
+  if (v == null || isNaN(v)) return '-';
+  if (fmt === 'currency')    return fmtCur(v);
+  if (fmt === 'percent')     return fmtPct(v);
+  if (fmt === 'percent_raw') return v.toFixed(1) + '%';
+  if (fmt === 'decimal')     return fmtDec(v);
+  return String(v);
+}
+
+// Excel number format string for each KPI type
+function excelFmt(fmt) {
+  if (fmt === 'currency')    return '$#,##0.00';
+  if (fmt === 'percent_raw') return '0.0"%"';
+  if (fmt === 'percent')     return '0.0%';
+  if (fmt === 'decimal')     return '#,##0.00';
+  return '@';
+}
 
 // ══════════════════════════════════════════════════
 // FETCH RETAILER LOGO  (best-effort, CORS-safe)
@@ -418,12 +640,19 @@ function catAbbrev(cat) {
   return cleaned.substring(0, 12) || 'Cat';
 }
 
-async function buildExcel(df, retailers, periods, cats, reportDate, progressCb) {
+async function buildExcel(df, retailers, periods, cats, reportDate, kpiCols, reportMode, progressCb) {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Create Wellness';
 
-  const hasBrand       = df.some(r => r.Brand != null && r.Brand !== '');
-  const hasDescription = df.some(r => r.Description != null && r.Description !== '');
+  // groupCol depends on chosen mode
+  const groupCol = reportMode === 'sku' ? 'Description' : 'Brand';
+  const productLevel = reportMode === 'sku' ? 'UPC' : 'BRAND';
+
+  // Fall back gracefully if the chosen column doesn't exist in this file
+  const hasGroupCol = df.some(r => r[groupCol] != null && r[groupCol] !== '');
+  if (!hasGroupCol) {
+    throw new Error(`The chosen ${reportMode === 'sku' ? 'SKU' : 'Brand'} report requires a ${groupCol} column, but none was found in the data.`);
+  }
 
   // Fetch retailer logos (best-effort)
   const logoCache = {};
@@ -434,21 +663,18 @@ async function buildExcel(df, retailers, periods, cats, reportDate, progressCb) 
   const createWmB64 = LOGOS['wordmark_orange'].split(',')[1];
 
   const entries = Object.entries(retailers);
-  // If no categories detected, use a single synthetic "All" bucket
   const effectiveCats = (cats && cats.length) ? cats : [null];
 
-  // Pre-compute total work, only counting sheets we'll actually write
+  // Count work
   let total = 0;
   for (const [geo] of entries) {
     for (const cat of effectiveCats) {
-      const bd = hasBrand       ? pivotData(df, geo, cat, 'Brand', periods)       : [];
-      const sd = hasDescription ? pivotData(df, geo, cat, 'Description', periods) : [];
-      if (bd.length) total++;
-      if (sd.length) total++;
+      const data = pivotData(df, geo, cat, groupCol, periods, kpiCols, productLevel);
+      if (data.length) total++;
     }
   }
   if (total === 0) {
-    throw new Error('No data to write — the file has rows but none match the detected retailers/categories/periods. Check the column mapping.');
+    throw new Error(`No data to write. With ${reportMode === 'sku' ? 'SKU (UPC-level)' : 'Brand-level'} filter applied, no rows matched the detected retailers/categories. Try the other mode, or check the column mapping.`);
   }
 
   const usedNames = new Set();
@@ -457,47 +683,32 @@ async function buildExcel(df, retailers, periods, cats, reportDate, progressCb) 
   for (const [geo, lbl] of entries) {
     for (const cat of effectiveCats) {
       const catLbl = cat ? catAbbrev(cat) : 'All';
+      const data = pivotData(df, geo, cat, groupCol, periods, kpiCols, productLevel);
+      if (!data.length) continue;
 
-      if (hasBrand) {
-        const brandData = pivotData(df, geo, cat, 'Brand', periods);
-        if (brandData.length) {
-          const sheetName = safeSheetName(`${lbl} ${catLbl}`, usedNames);
-          await writeSheet(wb, sheetName, brandData, 'Brand', lbl, geo, cat || 'All', logoCache[lbl], createWmB64, reportDate, false, periods);
-          done++; progressCb(done/total);
-        }
-      }
-
-      if (hasDescription) {
-        const skuData = pivotData(df, geo, cat, 'Description', periods);
-        if (skuData.length) {
-          const sheetName = safeSheetName(`${lbl} SKU ${catLbl}`, usedNames);
-          await writeSheet(wb, sheetName, skuData, 'Description', lbl, geo, cat || 'All', logoCache[lbl], createWmB64, reportDate, true, periods);
-          done++; progressCb(done/total);
-        }
-      }
+      const modeTag = reportMode === 'sku' ? 'SKU' : 'Brand';
+      const sheetName = safeSheetName(`${lbl} ${modeTag} ${catLbl}`, usedNames);
+      await writeSheet(wb, sheetName, data, groupCol, lbl, geo, cat || 'All', logoCache[lbl], createWmB64, reportDate, reportMode, periods, kpiCols);
+      done++; progressCb(done / total);
     }
   }
   return wb.xlsx.writeBuffer();
 }
 
-async function writeSheet(wb, name, data, groupCol, lbl, geoRaw, cat, retailerLogoB64, createWmB64, reportDate, isSku, periods) {
+async function writeSheet(wb, name, data, groupCol, lbl, geoRaw, cat, retailerLogoB64, createWmB64, reportDate, reportMode, periods, kpiCols) {
   const ws = wb.addWorksheet(name, { views:[{ state:'frozen', ySplit:8, xSplit:2 }] });
   const n  = periods.length;
+  const isSku = reportMode === 'sku';
 
   // Column widths
   ws.getColumn(1).width = 3;
-  ws.getColumn(2).width = 44;
-  for (let i=0; i<n; i++) ws.getColumn(3+i).width = 16;
-  ws.getColumn(3+n).width = 2;
-  for (let i=0; i<n; i++) ws.getColumn(4+n+i).width = 16;
-  ws.getColumn(4+2*n).width = 2;
-  for (let i=0; i<n; i++) ws.getColumn(5+2*n+i).width = 14;
+  ws.getColumn(2).width = isSku ? 50 : 38;
+  // Variable widths for KPI columns are set per-table below
 
   // Row heights
-  for (let r=1; r<=8; r++) ws.getRow(r).height = 20;
-  ws.getRow(7).height = 30; ws.getRow(8).height = 28;
+  for (let r=1; r<=6; r++) ws.getRow(r).height = 20;
 
-  // Logos
+  // ── Header logos and metadata (rows 1-6) ──
   if (retailerLogoB64) {
     try {
       const imgId = wb.addImage({ base64: retailerLogoB64, extension:'png' });
@@ -507,12 +718,11 @@ async function writeSheet(wb, name, data, groupCol, lbl, geoRaw, cat, retailerLo
   if (createWmB64) {
     try {
       const wmId = wb.addImage({ base64: createWmB64, extension:'png' });
-      const col = 4 + 3*n;
-      ws.addImage(wmId, { tl:{col:col-0.5, row:0.1}, ext:{width:90, height:Math.round(90*(450/1236))} });
+      // Place at right edge (col 8 area)
+      ws.addImage(wmId, { tl:{col:7.5, row:0.1}, ext:{width:90, height:Math.round(90*(450/1236))} });
     } catch(e) {}
   }
 
-  // Metadata helpers
   const meta = (r, c, val, bold, color, bgColor) => {
     const cell = ws.getCell(r, c);
     cell.value = val;
@@ -521,100 +731,151 @@ async function writeSheet(wb, name, data, groupCol, lbl, geoRaw, cat, retailerLo
   };
 
   meta(1, 2, name, true, 'FFF57E25');
-  meta(2, 2, 'Retailer:',    true,  'FFF57E25');  meta(2, 3, geoRaw,                          false, 'FF444444');
-  meta(3, 2, 'Report Date:', true,  'FFF57E25');  meta(3, 3, reportDate,                      false, 'FF444444');
-  meta(4, 2, 'Category:',    true,  'FFF57E25');  meta(4, 3, cat,                             false, 'FF444444');
-  meta(5, 2, 'Prepared by:', true,  'FFF57E25');  meta(5, 3, 'Create Wellness · Retail Analytics', false, 'FF444444');
+  meta(2, 2, 'Retailer:',    true,  'FFF57E25');  meta(2, 3, geoRaw, false, 'FF444444');
+  meta(3, 2, 'Report Date:', true,  'FFF57E25');  meta(3, 3, reportDate, false, 'FF444444');
+  meta(4, 2, 'Category:',    true,  'FFF57E25');  meta(4, 3, cat, false, 'FF444444');
+  meta(5, 2, 'Mode:',        true,  'FFF57E25');  meta(5, 3, isSku ? 'SKU (UPC-level)' : 'BRAND-level', false, 'FF444444');
+  meta(6, 2, 'Prepared by:', true,  'FFF57E25');  meta(6, 3, 'Create Wellness · Retail Analytics', false, 'FF444444');
 
-  const lblCell = ws.getCell(6, 2);
-  lblCell.value = isSku ? '$ Sales by SKU' : '$ Sales by Brand';
-  lblCell.font  = {name:'Calibri', bold:true, size:10, color:{argb:'FFF57E25'}};
-  lblCell.fill  = {type:'pattern', pattern:'solid', fgColor:{argb:'FFFFF2D2'}};
-  lblCell.border= borderAll('FFF0C898');
+  // ── Render one stacked table per detected KPI ──
+  let cursor = 8; // start at row 8
+  const detectedKPIs = KPI_DEFS.filter(def => kpiCols[def.key]);
 
-  // Header row 7
+  for (const def of detectedKPIs) {
+    cursor = writeKPITable(ws, cursor, def, data, groupCol, periods, kpiCols, isSku);
+    cursor += 2; // gap between tables
+  }
+}
+
+// Write one KPI's table (header + current/yago/growth columns, then data rows).
+// Returns the next available row index after this table.
+function writeKPITable(ws, startRow, def, data, groupCol, periods, kpiCols, isSku) {
+  const n = periods.length;
+  const hasYago = !!kpiCols[def.key].yago;
+  const showGrowth = def.showGrowth && hasYago;
+
+  // Column layout: [1=gutter, 2=name, 3..3+n-1=current, gap, 4+n..3+2n=yago, gap, 5+2n..4+3n=growth]
+  const curStart  = 3;
+  const yagoStart = hasYago ? curStart + n + 1 : null;       // +1 for spacer
+  const grwStart  = showGrowth ? (yagoStart + n + 1) : null;
+
+  // Set widths for the columns this table uses
+  for (let i = 0; i < n; i++) ws.getColumn(curStart + i).width = 13;
+  if (hasYago) {
+    ws.getColumn(curStart + n).width = 2;
+    for (let i = 0; i < n; i++) ws.getColumn(yagoStart + i).width = 13;
+  }
+  if (showGrowth) {
+    ws.getColumn(yagoStart + n).width = 2;
+    for (let i = 0; i < n; i++) ws.getColumn(grwStart + i).width = 12;
+  }
+
+  // KPI label row
+  const labelRow = ws.getRow(startRow);
+  const labelCell = labelRow.getCell(2);
+  labelCell.value = def.label;
+  labelCell.font = { name:'Calibri', bold:true, size:11, color:{argb:'FFFFFFFF'} };
+  labelCell.fill = { type:'pattern', pattern:'solid', fgColor:{argb:'FFF57E25'} };
+  labelCell.alignment = { vertical:'middle' };
+  // Merge label across full width
+  const totalCols = 2 + n + (hasYago ? n + 1 : 0) + (showGrowth ? n + 1 : 0);
+  ws.mergeCells(startRow, 2, startRow, 1 + totalCols);
+  labelRow.height = 22;
+
+  // Section header row (CURRENT, YAGO, GROWTH)
+  const hdrRow = startRow + 1;
+  ws.getRow(hdrRow).height = 22;
   const hStyle = {
-    font: {name:'Calibri', bold:true, size:10, color:{argb:'FFFFFFFF'}},
-    fill: {type:'pattern', pattern:'solid', fgColor:{argb:'FFF57E25'}},
+    font: {name:'Calibri', bold:true, size:9, color:{argb:'FFFFFFFF'}},
+    fill: {type:'pattern', pattern:'solid', fgColor:{argb:'FFFBAE42'}},
     alignment: {horizontal:'center', vertical:'middle', wrapText:true},
     border: borderAll('FFE0E0E0'),
   };
-  const spStyle = { fill:{type:'pattern', pattern:'solid', fgColor:{argb:'FFF57E25'}} };
+  hCell(ws, hdrRow, 2, isSku ? 'DESCRIPTION' : 'BRAND', hStyle);
+  if (n > 1) ws.mergeCells(hdrRow, curStart, hdrRow, curStart + n - 1);
+  hCell(ws, hdrRow, curStart, 'CURRENT', hStyle);
+  if (hasYago) {
+    if (n > 1) ws.mergeCells(hdrRow, yagoStart, hdrRow, yagoStart + n - 1);
+    hCell(ws, hdrRow, yagoStart, 'YAGO (LAST YEAR)', hStyle);
+  }
+  if (showGrowth) {
+    if (n > 1) ws.mergeCells(hdrRow, grwStart, hdrRow, grwStart + n - 1);
+    hCell(ws, hdrRow, grwStart, '% GROWTH VS YAGO', hStyle);
+  }
 
-  hCell(ws, 7, 2, lbl.toUpperCase(), hStyle);
-
-  if (n > 1) { ws.mergeCells(7, 3, 7, 2+n); }
-  hCell(ws, 7, 3, '$ SALES', hStyle);
-  hCell(ws, 7, 3+n, '', spStyle);
-
-  if (n > 1) { ws.mergeCells(7, 4+n, 7, 3+2*n); }
-  hCell(ws, 7, 4+n, '$ SALES YAGO', hStyle);
-  hCell(ws, 7, 4+2*n, '', spStyle);
-
-  if (n > 1) { ws.mergeCells(7, 5+2*n, 7, 4+3*n); }
-  hCell(ws, 7, 5+2*n, '% GROWTH VS YAGO', hStyle);
-
-  // Header row 8
-  const shStyle = {
-    font: {name:'Calibri', bold:true, size:10, color:{argb:'FFFFFFFF'}},
-    fill: {type:'pattern', pattern:'solid', fgColor:{argb:'FFFBAE42'}},
+  // Period header row
+  const pRow = startRow + 2;
+  ws.getRow(pRow).height = 20;
+  const pStyle = {
+    font: {name:'Calibri', bold:true, size:8, color:{argb:'FF444444'}},
+    fill: {type:'pattern', pattern:'solid', fgColor:{argb:'FFFFF2D2'}},
     alignment: {horizontal:'center', vertical:'middle'},
     border: borderAll('FFE0E0E0'),
   };
-  hCell(ws, 8, 2, isSku ? 'DESCRIPTION / UPC' : 'BRAND', shStyle);
+  hCell(ws, pRow, 2, '', pStyle);
   periods.forEach((tp, i) => {
-    hCell(ws, 8, 3+i,     tp, shStyle);
-    hCell(ws, 8, 4+n+i,   tp, shStyle);
-    hCell(ws, 8, 5+2*n+i, tp, shStyle);
+    hCell(ws, pRow, curStart + i, tp, pStyle);
+    if (hasYago) hCell(ws, pRow, yagoStart + i, tp, pStyle);
+    if (showGrowth) hCell(ws, pRow, grwStart + i, tp, pStyle);
   });
-  hCell(ws, 8, 3+n,   '', shStyle);
-  hCell(ws, 8, 4+2*n, '', shStyle);
-
-  if (!data.length) {
-    ws.getCell(9, 2).value = 'No data available.';
-    return;
-  }
 
   // Data rows
+  let dataRow = startRow + 3;
+  const cols = kpiCols[def.key];
   data.forEach((row, idx) => {
-    const er  = 9 + idx;
     const alt = idx % 2 === 1;
     const bg  = alt ? 'FFFAFAFA' : 'FFFFFFFF';
+    const baseFmt = {
+      font:{name:'Calibri',size:9},
+      fill:{type:'pattern',pattern:'solid',fgColor:{argb:bg}},
+      border:borderAll('FFEEEEEE'),
+    };
 
-    const nFmt = {font:{name:'Calibri',size:9}, fill:{type:'pattern',pattern:'solid',fgColor:{argb:bg}}, border:borderAll('FFEEEEEE'), alignment:{wrapText:true}};
-    const cFmt = {font:{name:'Calibri',size:9}, fill:{type:'pattern',pattern:'solid',fgColor:{argb:bg}}, border:borderAll('FFEEEEEE'), numFmt:'$#,##0.00'};
-    const sFmt = {fill:{type:'pattern',pattern:'solid',fgColor:{argb:bg}}};
+    // Name column (only render once per data row across all KPI tables, but each table re-renders it for readability)
+    dCell(ws, dataRow, 2, row[groupCol], {...baseFmt, alignment:{wrapText:true}});
 
-    dCell(ws, er, 2, row[groupCol], nFmt);
-
+    // Current values
     periods.forEach((tp, i) => {
-      dCell(ws, er, 3+i,   row[`$ Sales ${tp}`]      || 0, cFmt);
-      dCell(ws, er, 4+n+i, row[`$ Sales YAGO ${tp}`] || 0, cFmt);
+      const v = row[`${def.key} ${tp}`];
+      dCell(ws, dataRow, curStart + i, v == null ? '' : v, {...baseFmt, numFmt: excelFmt(def.fmt), alignment:{horizontal:'right'}});
     });
-    dCell(ws, er, 3+n,   '', sFmt);
-    dCell(ws, er, 4+2*n, '', sFmt);
 
-    periods.forEach((tp, i) => {
-      const g   = row[`% Growth ${tp}`];
-      const col = 5 + 2*n + i;
-      if (g == null || isNaN(g)) {
-        dCell(ws, er, col, 'n.m.', {
-          font:{name:'Calibri',size:9,italic:true,color:{argb:'FFBBBBBB'}},
-          fill:{type:'pattern',pattern:'solid',fgColor:{argb:bg}},
-          border:borderAll('FFEEEEEE'),
-          alignment:{horizontal:'center'},
-        });
-      } else {
-        const clr = g > 0.02 ? 'FF2D7D46' : g < -0.02 ? 'FFC0392B' : 'FF333333';
-        dCell(ws, er, col, g, {
-          font:{name:'Calibri',size:9,bold:Math.abs(g)>0.02,color:{argb:clr}},
-          fill:{type:'pattern',pattern:'solid',fgColor:{argb:bg}},
-          border:borderAll('FFEEEEEE'),
-          numFmt:'0.0%',
-        });
-      }
-    });
+    // YAGO values
+    if (hasYago) {
+      periods.forEach((tp, i) => {
+        const v = row[`${def.key} YAGO ${tp}`];
+        dCell(ws, dataRow, yagoStart + i, v == null ? '' : v, {...baseFmt, numFmt: excelFmt(def.fmt), alignment:{horizontal:'right'}});
+      });
+    }
+
+    // Growth values
+    if (showGrowth) {
+      periods.forEach((tp, i) => {
+        const g = row[`${def.key} Growth ${tp}`];
+        if (g == null || isNaN(g)) {
+          dCell(ws, dataRow, grwStart + i, 'n.m.', {
+            font:{name:'Calibri',size:9,italic:true,color:{argb:'FFBBBBBB'}},
+            fill:{type:'pattern',pattern:'solid',fgColor:{argb:bg}},
+            border:borderAll('FFEEEEEE'),
+            alignment:{horizontal:'center'},
+          });
+        } else {
+          const clr = g > 0.02 ? 'FF2D7D46' : g < -0.02 ? 'FFC0392B' : 'FF333333';
+          dCell(ws, dataRow, grwStart + i, g, {
+            font:{name:'Calibri',size:9,bold:Math.abs(g)>0.02,color:{argb:clr}},
+            fill:{type:'pattern',pattern:'solid',fgColor:{argb:bg}},
+            border:borderAll('FFEEEEEE'),
+            numFmt:'0.0%',
+            alignment:{horizontal:'right'},
+          });
+        }
+      });
+    }
+
+    dataRow++;
   });
+
+  return dataRow;
 }
 
 function hCell(ws, r, c, val, style) {
@@ -662,179 +923,165 @@ function drawStarburst(doc, cx, cy, r, spokes, rr, gg, bb) {
 // ══════════════════════════════════════════════════
 // PDF GENERATION  (jsPDF + autoTable)
 // ══════════════════════════════════════════════════
-async function buildPDF(df, retailers, periods, cats, reportDate) {
+async function buildPDF(df, retailers, periods, cats, reportDate, kpiCols, reportMode) {
   const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({orientation:'portrait', unit:'mm', format:'a4'});
-  const W=210, H=297, M=18, CW=W-2*M;
+  const doc = new jsPDF({orientation:'landscape', unit:'mm', format:'a4'});
+  // Landscape gives us room for all 4 periods + YAGO side by side
+  const W=297, H=210, M=14, CW=W-2*M;
+
+  const groupCol = reportMode === 'sku' ? 'Description' : 'Brand';
+  const productLevel = reportMode === 'sku' ? 'UPC' : 'BRAND';
+  const modeLabel = reportMode === 'sku' ? 'SKU-LEVEL' : 'BRAND-LEVEL';
 
   const entries = Object.entries(retailers);
-  const lastP   = periods[periods.length-1];
-  const firstP  = periods[0];
+  const lastP = periods[periods.length - 1];
+  const detectedKPIs = KPI_DEFS.filter(def => kpiCols[def.key]);
 
-  // ── Cover ──────────────────────────────────────
+  // ── Cover page ──────────────────────────────────
   doc.setFillColor(245, 126, 37);
   doc.rect(0, 0, W, H, 'F');
 
-  // (no watermark)
-
-  // Wordmark
   try { doc.addImage(LOGOS['wordmark_white'], 'PNG', M, M+2, 58, 58*(450/1236)); } catch(e) {}
 
-  // Title
-  doc.setFillColor(0,0,0,0);
   doc.setTextColor(255,255,255);
-  doc.setFontSize(36);
-  doc.setFont('helvetica','bold');
-  doc.text('Retail Board', M, 85);
-  doc.text('Report', M, 100);
+  doc.setFontSize(36); doc.setFont('helvetica','bold');
+  doc.text('Retail Board', M, 75);
+  doc.text('Report', M, 90);
 
-  doc.setFontSize(12);
-  doc.setFont('helvetica','normal');
+  doc.setFontSize(13); doc.setFont('helvetica','normal');
   doc.setTextColor(255,228,192);
-  doc.text('SPINS Category Intelligence', M, 114);
+  doc.text(`SPINS Category Intelligence  ·  ${modeLabel}`, M, 105);
 
-  // Total 52W sales
-  let total52 = 0;
-  entries.forEach(([geo]) => cats.forEach(cat => {
-    pivotData(df, geo, cat, 'Brand', periods).forEach(r => { total52 += r[`$ Sales ${lastP}`]||0; });
-  }));
-
-  // Meta strip
-  const metas = [
-    ['Report Date',     reportDate],
-    ['Retailers',       String(entries.length)],
-    ['Total 52W Sales', fmtCur(total52)],
-    ['Categories',      cats.map(c => CAT_LABELS[c]||c).join(' · ')],
-  ];
-  const kw = CW/4;
-  metas.forEach(([lbl, val], i) => {
-    const x = M + i*kw;
-    doc.setFontSize(6.5); doc.setFont('helvetica','normal'); doc.setTextColor(255,228,192);
-    doc.text(lbl.toUpperCase(), x, 132);
-    doc.setFontSize(12); doc.setFont('helvetica','bold'); doc.setTextColor(255,255,255);
-    doc.text(String(val), x, 142);
+  // Total sales at last period
+  let totalSales = 0;
+  entries.forEach(([geo]) => {
+    (cats.length ? cats : [null]).forEach(cat => {
+      const cols = kpiCols.sales;
+      if (!cols) return;
+      pivotData(df, geo, cat, groupCol, periods, kpiCols, productLevel).forEach(r => {
+        totalSales += r[`sales ${lastP}`] || 0;
+      });
+    });
   });
 
-  // ── Retailer pages ──────────────────────────────
-  const hasBrandCol = df.some(r => r.Brand != null && r.Brand !== '');
-  const hasDescCol  = df.some(r => r.Description != null && r.Description !== '');
+  const metas = [
+    ['Report Date',         reportDate],
+    ['Mode',                reportMode === 'sku' ? 'SKU (UPC-level)' : 'BRAND-level'],
+    ['Retailers',           String(entries.length)],
+    [`Total ${lastP} Sales`, fmtCur(totalSales)],
+  ];
+  const kw = CW / 4;
+  metas.forEach(([lbl, val], i) => {
+    const x = M + i * kw;
+    doc.setFontSize(7); doc.setFont('helvetica','normal'); doc.setTextColor(255,228,192);
+    doc.text(lbl.toUpperCase(), x, 130);
+    doc.setFontSize(13); doc.setFont('helvetica','bold'); doc.setTextColor(255,255,255);
+    doc.text(String(val), x, 140);
+  });
+
+  doc.setFontSize(9); doc.setFont('helvetica','normal'); doc.setTextColor(255,228,192);
+  doc.text(`Categories: ${cats.map(c => CAT_LABELS[c] || c).join(' · ') || 'All'}`, M, 160);
+  doc.text(`Time periods: ${periods.join(' · ')}`, M, 167);
+  doc.text(`Metrics: ${detectedKPIs.map(d => d.label.split(' (')[0]).join(' · ')}`, M, 174);
+
+  // ── Per retailer/category KPI pages ─────────────
   const effectiveCats = (cats && cats.length) ? cats : [null];
 
-  entries.forEach(([geo, lbl]) => {
-    // Skip retailers with no data at all
-    const retailerHasData = effectiveCats.some(c => {
-      const bd = hasBrandCol ? pivotData(df, geo, c, 'Brand', periods) : [];
-      const sd = hasDescCol  ? pivotData(df, geo, c, 'Description', periods) : [];
-      return bd.length || sd.length;
-    });
-    if (!retailerHasData) return;
+  for (const [geo, lbl] of entries) {
+    for (const cat of effectiveCats) {
+      const data = pivotData(df, geo, cat, groupCol, periods, kpiCols, productLevel);
+      if (!data.length) continue;
 
-    doc.addPage();
-    let y = M;
+      doc.addPage();
+      let y = M;
 
-    // Orange header
-    doc.setFillColor(245,126,37);
-    doc.rect(M, y, CW, 13, 'F');
-    doc.setTextColor(255,255,255);
-    doc.setFontSize(11);
-    doc.setFont('helvetica','bold');
-    doc.text(`  ${String(lbl).toUpperCase()}   ·   ${geo}`, M+3, y+9);
-    y += 20;
-
-    effectiveCats.forEach(cat => {
-      // Use Brand if available; otherwise Description for the grouping
-      const groupCol = hasBrandCol ? 'Brand' : 'Description';
-      const bd  = pivotData(df, geo, cat, groupCol, periods);
-      if (!bd.length) return;
-      const t52 = bd.reduce((a,r) => a+(r[`$ Sales ${lastP}`]||0), 0);
-      const t4  = bd.reduce((a,r) => a+(r[`$ Sales ${firstP}`]||0), 0);
-      const y52 = bd.reduce((a,r) => a+(r[`$ Sales YAGO ${lastP}`]||0), 0);
-      const g52 = y52 ? (t52-y52)/y52 : null;
-
-      // Check page space (rough)
-      if (y > H - 80) { doc.addPage(); y = M; }
-
-      // Category label
-      doc.setFontSize(7); doc.setFont('helvetica','bold'); doc.setTextColor(245,126,37);
+      // Retailer header bar
+      doc.setFillColor(245,126,37);
+      doc.rect(M, y, CW, 11, 'F');
+      doc.setTextColor(255,255,255);
+      doc.setFontSize(11); doc.setFont('helvetica','bold');
+      doc.text(`  ${String(lbl).toUpperCase()}   ·   ${geo}`, M+3, y+7.5);
+      doc.setFontSize(8); doc.setFont('helvetica','normal');
       const catLabel = cat ? (CAT_LABELS[cat] || String(cat)) : 'All Products';
-      doc.text(catLabel.toUpperCase(), M, y);
-      y += 6;
+      doc.text(`${catLabel}  ·  ${reportMode === 'sku' ? 'SKU' : 'Brand'} report`, M + CW - 3, y+7.5, {align:'right'});
+      y += 16;
 
-      // KPI tiles
-      const kpis = [
-        ['52-Week Sales', fmtCur(t52),   null],
-        ['4-Week Sales',  fmtCur(t4),    null],
-        ['52W vs YAGO',   fmtSign(g52),  g52],
-        ['Active Brands', String(bd.length), null],
-      ];
-      const kw2 = CW/4;
-      kpis.forEach(([klbl, kval, gval], ki) => {
-        const kx = M + ki*kw2;
-        doc.setFillColor(255,242,210);
-        doc.rect(kx, y, kw2-2, 20, 'F');
-        doc.setFontSize(13); doc.setFont('helvetica','bold');
-        if (gval !== null && gval !== undefined) {
-          if (gval < 0) doc.setTextColor(192,57,43);
-          else if (gval > 0) doc.setTextColor(45,125,70);
-          else doc.setTextColor(26,26,26);
-        } else doc.setTextColor(26,26,26);
-        doc.text(kval, kx+4, y+10);
-        doc.setFontSize(6); doc.setFont('helvetica','normal'); doc.setTextColor(102,102,102);
-        doc.text(klbl, kx+4, y+17);
-      });
-      y += 24;
-
-      // Brand table
-      if (y > H - 50) { doc.addPage(); y = M; }
-      const firstLbl = periods[0] || 'Recent';
-      const lastLbl  = periods[periods.length-1] || 'Total';
-      const head = [[groupCol, `${firstLbl} Sales`, `${lastLbl} Sales`, `${lastLbl} YAGO`, `${firstLbl} Grwth`, `${lastLbl} Grwth`, 'Share']];
-      const body = bd.slice(0,10).map(r => {
-        const s52  = r[`$ Sales ${lastP}`]      || 0;
-        const s4   = r[`$ Sales ${firstP}`]     || 0;
-        const y52r = r[`$ Sales YAGO ${lastP}`] || 0;
-        const g52r = r[`% Growth ${lastP}`];
-        const g4r  = r[`% Growth ${firstP}`];
-        return [
-          r[groupCol] || '—',
-          fmtCur(s4), fmtCur(s52), fmtCur(y52r),
-          fmtSign(g4r), fmtSign(g52r),
-          t52 ? (s52/t52*100).toFixed(1)+'%' : '—',
-        ];
-      });
-
-      doc.autoTable({
-        head, body,
-        startY: y,
-        margin: {left:M, right:M},
-        styles: {fontSize:6.5, cellPadding:2, valign:'middle', overflow:'linebreak'},
-        headStyles: {fillColor:[251,174,66], textColor:[255,255,255], fontStyle:'bold', fontSize:6.5},
-        alternateRowStyles: {fillColor:[255,242,210]},
-        columnStyles: {
-          0:{cellWidth:CW*0.27}, 1:{cellWidth:CW*0.12,halign:'right'},
-          2:{cellWidth:CW*0.13,halign:'right'}, 3:{cellWidth:CW*0.13,halign:'right'},
-          4:{cellWidth:CW*0.11,halign:'right'}, 5:{cellWidth:CW*0.11,halign:'right'},
-          6:{cellWidth:CW*0.13,halign:'right'},
-        },
-        didParseCell(d) {
-          if (d.section==='body' && [4,5].includes(d.column.index)) {
-            const v = String(d.cell.raw||'');
-            if (v.startsWith('+')) d.cell.styles.textColor=[45,125,70];
-            else if (v.startsWith('-')) d.cell.styles.textColor=[192,57,43];
-          }
-        },
-        didDrawPage() { drawFooter(doc, W, H, M, reportDate); },
-      });
-
-      y = doc.lastAutoTable.finalY + 10;
-
-      // Thin divider
-      doc.setDrawColor(251,174,66); doc.setLineWidth(0.4);
-      doc.line(M, y, M+CW, y); y += 10;
-    });
-  });
+      // Render each detected KPI as its own compact table
+      for (const def of detectedKPIs) {
+        if (y > H - 30) { doc.addPage(); y = M; }
+        y = drawKPITable(doc, y, M, CW, W, H, def, data, groupCol, periods, kpiCols, reportDate, lbl, cat);
+        y += 4;
+      }
+    }
+  }
 
   return doc.output('arraybuffer');
+}
+
+// Draw one KPI table on the PDF. Top 10 rows. Returns y-cursor after the table.
+function drawKPITable(doc, y, M, CW, W, H, def, data, groupCol, periods, kpiCols, reportDate, lbl, cat) {
+  const cols = kpiCols[def.key];
+  const hasYago = !!cols.yago;
+  const showGrowth = def.showGrowth && hasYago;
+
+  // KPI title strip
+  doc.setFillColor(255, 242, 210);
+  doc.rect(M, y, CW, 6, 'F');
+  doc.setFontSize(8); doc.setFont('helvetica','bold'); doc.setTextColor(245, 126, 37);
+  doc.text(def.label.toUpperCase(), M + 2, y + 4);
+  y += 7;
+
+  // Build header rows
+  const groupHdr = groupCol === 'Description' ? 'DESCRIPTION' : 'BRAND';
+  const head1 = [groupHdr];
+  const head2 = [''];
+
+  periods.forEach(tp => { head1.push('CURRENT'); head2.push(tp); });
+  if (hasYago) periods.forEach(tp => { head1.push('YAGO'); head2.push(tp); });
+  if (showGrowth) periods.forEach(tp => { head1.push('% GROWTH'); head2.push(tp); });
+
+  // Build body
+  const top = data.slice(0, 10);
+  const body = top.map(row => {
+    const r = [row[groupCol] || '—'];
+    periods.forEach(tp => r.push(fmtKPI(row[`${def.key} ${tp}`], def.fmt)));
+    if (hasYago) periods.forEach(tp => r.push(fmtKPI(row[`${def.key} YAGO ${tp}`], def.fmt)));
+    if (showGrowth) periods.forEach(tp => r.push(fmtSign(row[`${def.key} Growth ${tp}`])));
+    return r;
+  });
+
+  // Compute column widths
+  const numCols = head1.length;
+  const nameW = CW * 0.22;
+  const dataW = (CW - nameW) / (numCols - 1);
+  const colStyles = { 0: { cellWidth: nameW, halign: 'left' } };
+  for (let i = 1; i < numCols; i++) colStyles[i] = { cellWidth: dataW, halign: 'right' };
+
+  doc.autoTable({
+    head: [head1, head2],
+    body,
+    startY: y,
+    margin: { left: M, right: M },
+    theme: 'grid',
+    styles: { fontSize: 6.5, cellPadding: 1.4, valign: 'middle', overflow: 'linebreak', lineColor: [230,230,230], lineWidth: 0.1 },
+    headStyles: { fillColor: [251,174,66], textColor: [255,255,255], fontStyle: 'bold', fontSize: 6.5, halign: 'center' },
+    alternateRowStyles: { fillColor: [252,248,240] },
+    columnStyles: colStyles,
+    didParseCell(d) {
+      if (d.section === 'body' && showGrowth) {
+        // Growth columns start at: 1 + n + (hasYago ? n : 0)
+        const growthStart = 1 + periods.length + (hasYago ? periods.length : 0);
+        if (d.column.index >= growthStart) {
+          const v = String(d.cell.raw || '');
+          if (v.startsWith('+')) d.cell.styles.textColor = [45, 125, 70];
+          else if (v.startsWith('-')) d.cell.styles.textColor = [192, 57, 43];
+        }
+      }
+    },
+    didDrawPage() { drawFooter(doc, W, H, M, reportDate); },
+  });
+
+  return doc.lastAutoTable.finalY;
 }
 
 function drawFooter(doc, W, H, M, reportDate) {
@@ -864,11 +1111,21 @@ async function processFile(file) {
   const raw = XLSX.utils.sheet_to_json(ws, {defval:null, raw:false});
   if (!raw.length) { alert('File appears empty.'); return; }
 
+  // Reset all downstream UI on new upload
+  $('mode-section').classList.add('hidden');
+  $('generate-section').classList.add('hidden');
+  $('success-section').classList.add('hidden');
+  $('snapshot-section').classList.add('hidden');
+  S.zipBlob = null;
+  S.reportMode = null;
+
   S.rawData = raw;
   const headers = Object.keys(raw[0]);
   S.colMap  = detectColumns(headers);
 
-  const missing = Object.entries(S.colMap).filter(([,v])=>v===null).map(([k])=>k);
+  // Product Level is optional — file may not have it (older SPINS extracts)
+  const OPTIONAL = new Set(['Product Level']);
+  const missing = Object.entries(S.colMap).filter(([k,v]) => v === null && !OPTIONAL.has(k)).map(([k]) => k);
   $('placeholder').classList.add('hidden');
 
   if (missing.length) {
@@ -904,33 +1161,125 @@ async function processFile(file) {
 }
 
 function finalizeData() {
-  S.df       = normalizeData(S.rawData, S.colMap);
-  S.periods  = detectPeriods(S.df);
-  S.cats     = detectCats(S.df);
-  S.retailers= detectRetailers(S.df);
+  S.df         = normalizeData(S.rawData, S.colMap);
+  S.periods    = detectPeriods(S.df);
+  S.cats       = detectCats(S.df);
+  S.retailers  = detectRetailers(S.df);
+  // Detect KPIs from the *normalized* row keys (since pivotData reads normalized rows)
+  S.kpiCols    = detectKPIs(Object.keys(S.df[0] || {}));
+  S.productLevels = detectProductLevels(S.df);
+  S.reportMode = null;
   showSnapshot();
-  $('generate-section').classList.remove('hidden');
+  showModeToggle();
 }
 
 function showSnapshot() {
-  const { df, retailers, cats, periods } = S;
+  const { df, retailers, cats, periods, kpiCols, productLevels } = S;
+  const detectedKPIs = KPI_DEFS.filter(d => kpiCols[d.key]);
+
   $('card-grid').innerHTML = `
     <div class="card"><div class="val">${df.length.toLocaleString()}</div><div class="lbl">Rows</div></div>
     <div class="card"><div class="val">${Object.keys(retailers).length}</div><div class="lbl">Retailers</div></div>
-    <div class="card"><div class="val">${cats.length||'—'}</div><div class="lbl">Categories</div></div>`;
+    <div class="card"><div class="val">${cats.length||'—'}</div><div class="lbl">Categories</div></div>
+    <div class="card"><div class="val">${periods.length}</div><div class="lbl">Time periods</div></div>
+    <div class="card"><div class="val">${detectedKPIs.length}</div><div class="lbl">KPIs detected</div></div>`;
+
   const rv = Object.values(retailers);
   if (rv.length)   $('cap-retailers').textContent = `Retailers: ${rv.join(', ')}`;
   if (cats.length) $('cap-cats').textContent      = `Categories: ${cats.join(', ')}`;
-  if (periods.length) $('cap-periods').textContent = `Time periods: ${periods.join(', ')}`;
+  if (periods.length) $('cap-periods').textContent = `Time periods: ${periods.join(', ')}  ·  KPIs: ${detectedKPIs.map(d => d.label.split(' (')[0]).join(', ')}  ·  Product Levels in data: ${productLevels.length ? productLevels.join(', ') : 'not specified'}`;
 
-  const cols = ['Geography','Time Period','Subcategory','Brand','Description','Dollars','Dollars, Yago'].filter(c => df.some(r=>r[c]!=null));
+  const previewCols = ['Geography','Time Period','Product Level','Subcategory','Brand','Description'].filter(c => df.some(r => r[c] != null && r[c] !== ''));
+  // Add up to 2 KPI cols for preview
+  const sampleKpi = detectedKPIs.slice(0, 2).map(d => kpiCols[d.key].current);
+  const allPreviewCols = [...previewCols, ...sampleKpi];
+
   $('preview-tbl').innerHTML =
-    `<thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead>` +
-    `<tbody>${df.slice(0,8).map(row=>`<tr>${cols.map(c=>`<td>${row[c]??''}</td>`).join('')}</tr>`).join('')}</tbody>`;
+    `<thead><tr>${allPreviewCols.map(c=>`<th>${c}</th>`).join('')}</tr></thead>` +
+    `<tbody>${df.slice(0,8).map(row=>`<tr>${allPreviewCols.map(c=>`<td>${row[c]??''}</td>`).join('')}</tr>`).join('')}</tbody>`;
   $('snapshot-section').classList.remove('hidden');
 }
 
+// Show the Brand vs SKU toggle. Auto-pick if only one level present in data;
+// disable a tile if its underlying column (Brand or Description) is missing.
+function showModeToggle() {
+  const { df, productLevels } = S;
+  const hasBrand = df.some(r => r.Brand != null && r.Brand !== '');
+  const hasDesc  = df.some(r => r.Description != null && r.Description !== '');
+
+  const brandTile = $('mode-tile-brand');
+  const skuTile   = $('mode-tile-sku');
+  brandTile.classList.remove('active', 'disabled');
+  skuTile.classList.remove('active', 'disabled');
+
+  if (!hasBrand) brandTile.classList.add('disabled');
+  if (!hasDesc)  skuTile.classList.add('disabled');
+
+  // If a Product Level column is present and only one level exists in the data,
+  // auto-select the matching mode and lock the other one.
+  let autoMode = null;
+  let note = '';
+  if (productLevels.length === 1) {
+    const lvl = productLevels[0];
+    if (lvl === 'BRAND') {
+      autoMode = 'brand';
+      skuTile.classList.add('disabled');
+      note = `Data contains only BRAND-level rows (no UPC rows detected) — SKU mode disabled.`;
+    } else if (lvl === 'UPC') {
+      autoMode = 'sku';
+      brandTile.classList.add('disabled');
+      note = `Data contains only UPC-level rows (no BRAND rows detected) — Brand mode disabled.`;
+    }
+  } else if (productLevels.length >= 2) {
+    note = `Data contains both BRAND and UPC rows. Choose a mode to avoid double-counting sales.`;
+  } else {
+    // No Product Level column at all — fall back: both modes will use whatever grouping column is available
+    if (hasBrand && hasDesc) {
+      note = `No Product Level column detected. Brand mode groups by Brand column; SKU mode groups by Description column.`;
+    } else if (hasBrand) {
+      autoMode = 'brand';
+      skuTile.classList.add('disabled');
+      note = `Only Brand column detected — SKU mode disabled.`;
+    } else if (hasDesc) {
+      autoMode = 'sku';
+      brandTile.classList.add('disabled');
+      note = `Only Description column detected — Brand mode disabled.`;
+    }
+  }
+
+  $('mode-note').textContent = note;
+
+  // Default selection
+  if (autoMode) {
+    S.reportMode = autoMode;
+    (autoMode === 'brand' ? brandTile : skuTile).classList.add('active');
+    $('generate-section').classList.remove('hidden');
+  } else {
+    S.reportMode = null;
+    $('generate-section').classList.add('hidden');
+  }
+
+  $('mode-section').classList.remove('hidden');
+
+  // Wire click handlers (replace any previous to avoid duplicates)
+  [brandTile, skuTile].forEach(tile => {
+    tile.onclick = () => {
+      if (tile.classList.contains('disabled')) return;
+      brandTile.classList.remove('active');
+      skuTile.classList.remove('active');
+      tile.classList.add('active');
+      S.reportMode = tile.dataset.mode;
+      $('generate-section').classList.remove('hidden');
+    };
+  });
+}
+
 $('generate-btn').addEventListener('click', async () => {
+  if (!S.reportMode) {
+    alert('Please choose Brand Report or SKU Report first.');
+    return;
+  }
+
   $('generate-btn').disabled = true;
   $('prog-wrap').classList.remove('hidden');
   $('prog-lbl').classList.remove('hidden');
@@ -940,22 +1289,24 @@ $('generate-btn').addEventListener('click', async () => {
   setProgress(0, 'Building Excel…');
 
   try {
-    const { df, retailers, periods, cats } = S;
-    const xlBuf = await buildExcel(df, retailers, periods, cats, reportDate, p => setProgress(p*0.65, `Excel: ${Math.round(p*100)}%`));
+    const { df, retailers, periods, cats, kpiCols, reportMode } = S;
+    const xlBuf = await buildExcel(df, retailers, periods, cats, reportDate, kpiCols, reportMode, p => setProgress(p*0.65, `Excel: ${Math.round(p*100)}%`));
     setProgress(0.68, 'Building PDF…');
-    const pdfBuf = await buildPDF(df, retailers, periods, cats, reportDate);
+    const pdfBuf = await buildPDF(df, retailers, periods, cats, reportDate, kpiCols, reportMode);
     setProgress(0.88, 'Packaging ZIP…');
 
     const zip = new JSZip();
     const ts  = new Date().toISOString().split('T')[0];
-    zip.file(`CreateEXCELReport${ts}.xlsx`, xlBuf);
-    zip.file(`CreatePDFReport${ts}.pdf`, pdfBuf);
+    const modeTag = reportMode === 'sku' ? 'SKU' : 'BRAND';
+    zip.file(`CreateEXCELReport_${modeTag}_${ts}.xlsx`, xlBuf);
+    zip.file(`CreatePDFReport_${modeTag}_${ts}.pdf`, pdfBuf);
     S.zipBlob = await zip.generateAsync({type:'blob', compression:'DEFLATE'});
 
     setProgress(1.0, 'Done ✓');
     const rc = Object.keys(retailers).length;
     const cc = (cats && cats.length) ? cats.length : 1;
-    $('success-text').textContent = `${rc} retailers · ${cc} categories · PDF summary · ${reportDate}`;
+    const kc = KPI_DEFS.filter(d => kpiCols[d.key]).length;
+    $('success-text').textContent = `${modeTag} report  ·  ${rc} retailers  ·  ${cc} categories  ·  ${kc} KPIs  ·  ${reportDate}`;
     $('success-section').classList.remove('hidden');
   } catch(err) {
     console.error(err);
@@ -971,9 +1322,10 @@ $('generate-btn').addEventListener('click', async () => {
 $('download-btn').addEventListener('click', () => {
   if (!S.zipBlob) return;
   const ts = new Date().toISOString().split('T')[0];
+  const modeTag = S.reportMode === 'sku' ? 'SKU' : 'BRAND';
   const a  = document.createElement('a');
   a.href   = URL.createObjectURL(S.zipBlob);
-  a.download = `CreateReports${ts}.zip`;
+  a.download = `CreateReports_${modeTag}_${ts}.zip`;
   a.click();
 });
 
