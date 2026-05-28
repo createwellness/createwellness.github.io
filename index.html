@@ -493,6 +493,11 @@ function detectPeriods(data) {
 // groups by groupCol, and extracts ALL detected KPIs per period.
 // Returns rows with flat keys like `<key> <period>` and `<key> YAGO <period>`.
 // agg: 'sum' adds rows together (for $ Sales); 'mean' averages (per-store metrics)
+//
+// When the data has multiple end dates per period (trended SPINS pull),
+// we keep ONLY the most recent end date for each period. Otherwise we'd be
+// summing/averaging across multiple non-overlapping time windows — e.g.
+// summing eight separate 4-week-window snapshots into one inflated value.
 // ══════════════════════════════════════════════════
 function pivotData(data, geo, cat, groupCol, periods, kpiCols, productLevel) {
   let sub = data.filter(r => r.Geography === geo);
@@ -512,6 +517,33 @@ function pivotData(data, geo, cat, groupCol, periods, kpiCols, productLevel) {
   }
 
   if (!sub.length) return [];
+
+  // ── Keep only the most recent end date per period ──
+  // SPINS trended pulls include multiple end dates per period (e.g. 12 snapshots
+  // of the 4-week window). For a current-state table we want just the latest one.
+  const hasEndDate = sub.some(r => r['Time Period End Date'] != null && r['Time Period End Date'] !== '');
+  if (hasEndDate) {
+    // Find the most recent end date for each period
+    const mostRecent = {};
+    sub.forEach(r => {
+      const p = r['Time Period'];
+      const d = r['Time Period End Date'];
+      if (!p || !d) return;
+      const dt = new Date(d);
+      if (isNaN(dt.getTime())) return;
+      if (!mostRecent[p] || dt > mostRecent[p].dt) {
+        mostRecent[p] = { dt, dStr: String(d) };
+      }
+    });
+    sub = sub.filter(r => {
+      const p = r['Time Period'];
+      const d = r['Time Period End Date'];
+      if (!p) return false;
+      // If a row has no end date, keep it (older extracts without the column)
+      if (d == null || d === '') return !mostRecent[p];
+      return mostRecent[p] && String(d) === mostRecent[p].dStr;
+    });
+  }
 
   // Group rows by the chosen column (Brand or Description)
   const groups = {};
@@ -959,6 +991,94 @@ function assignBrandColors(brandNames) {
   return map;
 }
 
+// Convert a time period name to the number of weeks it represents.
+// Used to derive per-week averages from period totals (e.g. 12W $ Sales / 12 = avg weekly $).
+function periodToWeeks(period) {
+  if (period === '4 Weeks')  return 4;
+  if (period === '12 Weeks') return 12;
+  if (period === '24 Weeks') return 24;
+  if (period === '52 Weeks') return 52;
+  const m = String(period || '').match(/(\d+)/);
+  return m ? parseInt(m[1], 10) : 1;
+}
+
+// ── CHART KPI DEFINITIONS ─────────────────────────────────────
+// The user requested exactly 4 charts matching their Sell-Through deck:
+//   1. Average Weekly $ Sales       — derived: $ Sales / weeks
+//   2. Average Weekly Unit Sales    — derived: $ Sales / ARP / weeks
+//   3. $/S/S/W                      — direct column
+//   4. U/S/S/W                      — direct column
+// Each compute(row, kpiCols) returns the metric value for a single row, or null
+// if the underlying data isn't available. pivotTrendData aggregates these per-brand.
+const CHART_KPIS = {
+  avg_weekly_sales: {
+    key: 'avg_weekly_sales',
+    label: 'Average Weekly $ Sales',
+    fmt: 'currency',
+    agg: 'sum', // sum across multiple rows in SKU mode = total brand weekly $
+    compute: (row, kpiCols) => {
+      const col = kpiCols.sales?.current;
+      if (!col) return null;
+      const v = parseFloat(row[col]);
+      if (isNaN(v)) return null;
+      const w = periodToWeeks(row['Time Period']);
+      return w ? v / w : null;
+    },
+  },
+  avg_weekly_units: {
+    key: 'avg_weekly_units',
+    label: 'Average Weekly Unit Sales',
+    fmt: 'decimal',
+    agg: 'sum',
+    compute: (row, kpiCols) => {
+      // Derive units = Dollars / ARP (no Units column in standard SPINS pull)
+      const sCol = kpiCols.sales?.current;
+      const aCol = kpiCols.arp?.current;
+      if (!sCol || !aCol) return null;
+      const s = parseFloat(row[sCol]);
+      const a = parseFloat(row[aCol]);
+      if (isNaN(s) || isNaN(a) || a <= 0) return null;
+      const units = s / a;
+      const w = periodToWeeks(row['Time Period']);
+      return w ? units / w : null;
+    },
+  },
+  dssw_chart: {
+    key: 'dssw_chart',
+    label: '$ / S / S / W',
+    fmt: 'currency',
+    agg: 'mean', // per-store metric — average across rows
+    compute: (row, kpiCols) => {
+      const col = kpiCols.dssw?.current;
+      if (!col) return null;
+      const v = parseFloat(row[col]);
+      return isNaN(v) ? null : v;
+    },
+  },
+  ussw_chart: {
+    key: 'ussw_chart',
+    label: 'U / S / S / W',
+    fmt: 'decimal',
+    agg: 'mean',
+    compute: (row, kpiCols) => {
+      const col = kpiCols.ussw?.current;
+      if (!col) return null;
+      const v = parseFloat(row[col]);
+      return isNaN(v) ? null : v;
+    },
+  },
+};
+
+// Maps a table KPI's key → list of charts to render immediately after that table.
+// Tables not listed here get no following chart.
+// Avg Weekly $ Sales and Avg Weekly Unit Sales both pair with the $ Sales table
+// since they're derived from $ Sales (and ARP).
+const CHART_AFTER_TABLE = {
+  sales: ['avg_weekly_sales', 'avg_weekly_units'],
+  dssw:  ['dssw_chart'],
+  ussw:  ['ussw_chart'],
+};
+
 // Build trend series for one KPI: returns { xLabels, series:[{brand,values,color,total}], xMode }
 // xMode = 'dates' (using Time Period End Date) or 'periods' (fallback to 4W/12W/24W/52W)
 function pivotTrendData(data, geo, cat, groupCol, def, kpiCols, productLevel) {
@@ -978,37 +1098,58 @@ function pivotTrendData(data, geo, cat, groupCol, def, kpiCols, productLevel) {
   }
   if (!sub.length) return null;
 
-  const kpiCol = kpiCols[def.key]?.current;
-  if (!kpiCol) return null;
+  // Each chart KPI provides its own compute(row, kpiCols) function — supports both
+  // direct column reads and derived metrics like "$ Sales / weeks_in_period"
+  if (typeof def.compute !== 'function') return null;
 
-  // Choose X axis: prefer End Date filtered to shortest available period (4 Weeks)
-  // Fallback: plot the 4 standard time periods as the X axis
-  const hasEndDate = sub.some(r => r['Time Period End Date'] != null && r['Time Period End Date'] !== '');
+  // Decide X axis. Prefer end-date trending IF the data actually has multiple
+  // unique end dates (e.g. user pulled "4 Week Quads" across several end dates).
+  // Otherwise fall back to plotting against the 4 standard time periods
+  // (4W→12W→24W→52W) which still shows a meaningful "lookback window" view.
+  const distinctEndDates = new Set(
+    sub.map(r => r['Time Period End Date']).filter(v => v != null && v !== '')
+  );
 
-  let xKeys = [];   // raw values used for grouping
-  let xLabels = []; // display labels for the chart axis
+  let xKeys = [];
+  let xLabels = [];
   let xMode = 'periods';
   let getKey;
 
-  if (hasEndDate) {
-    // Pick the shortest period available so the trend has the most data points
+  if (distinctEndDates.size >= 2) {
+    // Pick the period with the MOST distinct end dates (gives the richest trend line).
+    // This avoids accidentally filtering to a period that only has 1 date when
+    // another period has many.
     const periodsPresent = [...new Set(sub.map(r => r['Time Period']).filter(Boolean))];
-    const ordered = ['4 Weeks','12 Weeks','24 Weeks','52 Weeks'];
-    const chosenPeriod = ordered.find(p => periodsPresent.includes(p)) || periodsPresent[0];
-    if (chosenPeriod) sub = sub.filter(r => r['Time Period'] === chosenPeriod);
+    let bestPeriod = null, bestCount = 0;
+    for (const p of periodsPresent) {
+      const datesInP = new Set(
+        sub.filter(r => r['Time Period'] === p)
+           .map(r => r['Time Period End Date'])
+           .filter(v => v != null && v !== '')
+      );
+      if (datesInP.size > bestCount) {
+        bestPeriod = p;
+        bestCount = datesInP.size;
+      }
+    }
 
-    // Collect unique dates, sort chronologically
-    const dates = [...new Set(sub.map(r => r['Time Period End Date']).filter(Boolean))];
-    dates.sort((a, b) => {
-      const da = new Date(a), db = new Date(b);
-      if (isNaN(da) || isNaN(db)) return String(a).localeCompare(String(b));
-      return da - db;
-    });
-    xKeys = dates;
-    xLabels = dates.map(formatShortDate);
-    getKey = r => r['Time Period End Date'];
-    xMode = 'dates';
-  } else {
+    if (bestPeriod && bestCount >= 2) {
+      sub = sub.filter(r => r['Time Period'] === bestPeriod);
+      const dates = [...new Set(sub.map(r => r['Time Period End Date']).filter(Boolean))];
+      dates.sort((a, b) => {
+        const da = new Date(a), db = new Date(b);
+        if (isNaN(da) || isNaN(db)) return String(a).localeCompare(String(b));
+        return da - db;
+      });
+      xKeys = dates;
+      xLabels = dates.map(formatShortDate);
+      getKey = r => r['Time Period End Date'];
+      xMode = 'dates';
+    }
+  }
+
+  // Fallback to periods mode if dates path didn't yield enough points
+  if (!xKeys.length) {
     const ordered = ['4 Weeks','12 Weeks','24 Weeks','52 Weeks'];
     xKeys = ordered.filter(p => sub.some(r => r['Time Period'] === p));
     if (!xKeys.length) return null;
@@ -1027,8 +1168,8 @@ function pivotTrendData(data, geo, cat, groupCol, def, kpiCols, productLevel) {
     if (b == null || b === '') return;
     const xk = getKey(r);
     if (xk == null) return;
-    const v = parseFloat(r[kpiCol]);
-    if (isNaN(v)) return;
+    const v = def.compute(r, kpiCols);
+    if (v == null || isNaN(v)) return;
     if (!brandData[b]) brandData[b] = {};
     if (!brandData[b][xk]) brandData[b][xk] = [];
     brandData[b][xk].push(v);
@@ -1106,20 +1247,19 @@ function niceMaxValue(v) {
   return nice * Math.pow(10, exp);
 }
 
-// Friendly chart titles that match the example deck's wording
+// Chart title — each chart KPI def carries its own label, but fall back to a
+// friendly map for any legacy direct-column KPIs that might still get charted.
 function chartTitleForKPI(def) {
+  if (def.label) return def.label;
   const map = {
     sales: 'Average Weekly $ Sales',
     acv:   'Avg % ACV',
-    items: 'Avg Items Selling per Store',
     promo: 'Dollars % Promo',
     arp:   'Avg Retail Price (ARP)',
     dssw:  '$ / S / S / W',
     ussw:  'U / S / S / W',
-    dsw:   'Avg Weekly $ per Store',
-    usw:   'Avg Weekly Units per Store',
   };
-  return map[def.key] || def.label;
+  return map[def.key] || def.key || 'Metric';
 }
 
 // Draw a full-page trend chart on the current PDF page.
@@ -1233,7 +1373,10 @@ function drawTrendChart(doc, def, trendData, W, H, M, lbl, geo, cat, reportDate)
     // End label: brand color, bold, just right of last point
     const last = pts[pts.length - 1];
     const valLabel = fmtChartY(last.val, def.fmt);
-    endLabels.push({ x: last.x + 2.2, y: last.y, label: valLabel, color: [r, g, b] });
+    endLabels.push({
+      x: last.x + 2.2, y: last.y, label: valLabel, color: [r, g, b],
+      isCreate: /create/i.test(s.brand),
+    });
   });
 
   // Stagger overlapping end labels (simple greedy: if too close to a previous one, nudge)
@@ -1249,6 +1392,18 @@ function drawTrendChart(doc, def, trendData, W, H, M, lbl, geo, cat, reportDate)
   endLabels.forEach(el => {
     doc.setTextColor(...el.color);
     doc.text(el.label, el.x, el.y + 1);
+
+    // Highlight CREATE's final value with a dashed orange rectangle,
+    // matching the callout style in the reference Sell-Through deck.
+    if (el.isCreate) {
+      const tw = doc.getTextWidth(el.label);
+      const padX = 1.2, boxH = 4.2;
+      doc.setLineDashPattern([0.7, 0.7], 0);
+      doc.setDrawColor(...el.color);
+      doc.setLineWidth(0.35);
+      doc.rect(el.x - padX, el.y - 1.8, tw + 2 * padX, boxH, 'S');
+      doc.setLineDashPattern([], 0); // reset to solid lines
+    }
   });
 
   // ── Brand legend (horizontal row, centered at bottom) ──
@@ -1349,7 +1504,7 @@ async function buildPDF(df, retailers, periods, cats, reportDate, kpiCols, repor
   doc.text(`Categories: ${cats.map(c => CAT_LABELS[c] || c).join(' · ') || 'All'}`, M, 160);
   doc.text(`Time periods: ${periods.join(' · ')}`, M, 167);
   doc.text(`Metrics: ${detectedKPIs.map(d => d.label.split(' (')[0]).join(' · ')}`, M, 174);
-  doc.text(`Includes: trend charts per KPI + detailed data tables`, M, 181);
+  doc.text(`Includes: Avg Weekly $ Sales · Unit Sales · $/S/S/W · U/S/S/W trend charts + data tables`, M, 181);
 
   // ── Per retailer/category KPI pages ─────────────
   const effectiveCats = (cats && cats.length) ? cats : [null];
@@ -1359,36 +1514,39 @@ async function buildPDF(df, retailers, periods, cats, reportDate, kpiCols, repor
       const data = pivotData(df, geo, cat, groupCol, periods, kpiCols, productLevel);
       if (!data.length) continue;
 
-      // ─── CHART PAGES — one full-page trend chart per KPI ───
-      // Each chart shows the KPI trended across time period end dates,
-      // with one colored line per top brand. Skipped if no trend data.
+      // For each KPI: render its TABLE page, then any CHART pages whose data ties
+      // to that table (mapping defined in CHART_AFTER_TABLE).
+      // Only 4 charts ever render: Avg Weekly $ Sales, Avg Weekly Unit Sales,
+      // $/S/S/W, U/S/S/W — placed after their conceptually-matching tables.
       for (const def of detectedKPIs) {
-        const trend = pivotTrendData(df, geo, cat, groupCol, def, kpiCols, productLevel);
-        if (!trend) continue; // not enough data points or no values
+        // ─── TABLE PAGE for this KPI ───
         doc.addPage();
-        drawTrendChart(doc, def, trend, W, H, M, lbl, geo, cat, reportDate);
-      }
+        let y = M;
 
-      // ─── DATA TABLE PAGE — existing stacked KPI tables ───
-      doc.addPage();
-      let y = M;
+        // Retailer header bar (repeated on each page so context is clear)
+        doc.setFillColor(245,126,37);
+        doc.rect(M, y, CW, 11, 'F');
+        doc.setTextColor(255,255,255);
+        doc.setFontSize(11); doc.setFont('helvetica','bold');
+        doc.text(`  ${String(lbl).toUpperCase()}   ·   ${geo}`, M+3, y+7.5);
+        doc.setFontSize(8); doc.setFont('helvetica','normal');
+        const catLabel = cat ? (CAT_LABELS[cat] || String(cat)) : 'All Products';
+        doc.text(`${catLabel}  ·  ${reportMode === 'sku' ? 'SKU' : 'Brand'} report`, M + CW - 3, y+7.5, {align:'right'});
+        y += 16;
 
-      // Retailer header bar
-      doc.setFillColor(245,126,37);
-      doc.rect(M, y, CW, 11, 'F');
-      doc.setTextColor(255,255,255);
-      doc.setFontSize(11); doc.setFont('helvetica','bold');
-      doc.text(`  ${String(lbl).toUpperCase()}   ·   ${geo}`, M+3, y+7.5);
-      doc.setFontSize(8); doc.setFont('helvetica','normal');
-      const catLabel = cat ? (CAT_LABELS[cat] || String(cat)) : 'All Products';
-      doc.text(`${catLabel}  ·  ${reportMode === 'sku' ? 'SKU' : 'Brand'} report`, M + CW - 3, y+7.5, {align:'right'});
-      y += 16;
+        // This KPI's data table
+        drawKPITable(doc, y, M, CW, W, H, def, data, groupCol, periods, kpiCols, reportDate, lbl, cat);
 
-      // Render each detected KPI as its own compact table
-      for (const def of detectedKPIs) {
-        if (y > H - 30) { doc.addPage(); y = M; }
-        y = drawKPITable(doc, y, M, CW, W, H, def, data, groupCol, periods, kpiCols, reportDate, lbl, cat);
-        y += 4;
+        // ─── CHART PAGES tied to this table ───
+        const chartKeys = CHART_AFTER_TABLE[def.key] || [];
+        for (const chartKey of chartKeys) {
+          const chartDef = CHART_KPIS[chartKey];
+          if (!chartDef) continue;
+          const trend = pivotTrendData(df, geo, cat, groupCol, chartDef, kpiCols, productLevel);
+          if (!trend) continue;
+          doc.addPage();
+          drawTrendChart(doc, chartDef, trend, W, H, M, lbl, geo, cat, reportDate);
+        }
       }
     }
   }
